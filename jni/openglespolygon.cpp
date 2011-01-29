@@ -1,28 +1,49 @@
-#include <gtk/gtk.h>
-#include <gdk/gdkx.h>
-#include <assert.h>
+/* Copyright (C) 2011 Nic Roets. All rights reserved.
 
-#include <algorithm>
-#include <vector>
-#include <set>
-#include <stdio.h>
+Redistribution and use in source and binary forms, with or without modification, are
+permitted provided that the following conditions are met:
+
+   1. Redistributions of source code must retain the above copyright notice, this list of
+      conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above copyright notice, this list
+      of conditions and the following disclaimer in the documentation and/or other materials
+      provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY Nic Roets ``AS IS'' AND ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are those of the
+authors and should not be interpreted as representing official policies, either expressed
+or implied, of Nic Roets.
+*/
+#include <jni.h>
+#include <GLES/gl.h>
+#include <GLES/glext.h>
+#include <assert.h>
 #include <string.h>
 
 using namespace std;
 
-struct edgeCmp
-{
-  bool operator()(const struct PolygonEdge *a, const struct PolygonEdge *b);
+struct GdkPoint {
+	short x, y;
 };
+typedef int calcType; // Used to prevent overflows when
+                      // multiplying two GdkPoint fields
 
 struct PolygonEdge {
-//  PolygonEdge () {}
   int isLeft : 1;
   int delta : 2; // Either -1 or 1
   int continues : 1; // It's a polygon stored in an array and this edge wraps
                      // over. We should continue at this+1 when cnt runs out.
   int cnt : 20;
-  //PolygonEdge **heap;
   GdkPoint *pt, prev;
   PolygonEdge *opp;
 /* I tried to make PolygonEdge a node in a tree by using a set<>. It failed
@@ -63,9 +84,6 @@ bool edgeCmp /*::operator()*/(const PolygonEdge *a, const PolygonEdge *b)
       }
     }
   }
-//    printf ("%3d,%3d   %3d,%3d   %3d,%3d\n", ap->x, ap->y, st->x, st->y,
-//      bp->x, bp->y);
-//  printf ("cross = %d\n", cross < 0);
   return cross < 0;
 }
 
@@ -250,9 +268,23 @@ void Add (struct PolygonEdge *n)
 }
 //----------------------------[ End of AA tree ]----------------------------
 
-void AddPolygon (vector<PolygonEdge> &d, GdkPoint *p, int cnt)
+struct PolygonEdges { // Emulate STL vector on Android.
+	PolygonEdge *e;
+	int size, alloced;
+	PolygonEdge &operator [](int i) { return e[i]; }
+	void resize (int s) {
+		if (alloced < s) { // Only grow.
+			alloced = s + s / 10;
+			e = (PolygonEdge*) realloc (e, alloced * sizeof (*e));
+		}
+		size = s;
+	}
+	~PolygonEdges () { free (e); }
+};
+
+void AddPolygon (PolygonEdges &d, GdkPoint *p, int cnt)
 {
-  int i, j, k, firstd = d.size ();
+  int i, j, k, firstd = d.size;
   for (j = cnt - 1; j > 0 && (p[j - 1].y == p[j].y || // p[j..cnt-1] becomes
     (p[j - 1].y < p[j].y) == (p[j].y < p[0].y)); j--) {} // monotone
   for (i = 0; i < j && (p[i].y == p[i + 1].y ||
@@ -272,28 +304,26 @@ void AddPolygon (vector<PolygonEdge> &d, GdkPoint *p, int cnt)
     if (p[lowest].y > p[i].y) lowest = i;
     for (k = i + 1; k < j && (p[k].y == p[k + 1].y || // p[i..k] becomes
         (p[k].y < p[k + 1].y) == (p[i].y < p[k].y)); k++) {} // monotone
-    d.push_back (PolygonEdge ());
-    d.back().pt = p + (p[i].y < p[k].y ? i : k);
-    d.back().delta = p[i].y < p[k].y ? 1 : -1;
-    d.back().continues = 0;
-    d.back().cnt = k - i + 1;
+    d.resize (d.size + 1);
+    d[d.size - 1].pt = p + (p[i].y < p[k].y ? i : k);
+    d[d.size - 1].delta = p[i].y < p[k].y ? 1 : -1;
+    d[d.size - 1].continues = 0;
+    d[d.size - 1].cnt = k - i + 1;
   }
   GdkPoint *ll = &p[(lowest + cnt - 1) % cnt], *lr = &p[(lowest + 1) % cnt];
-  for (i = firstd; i < d.size (); i++) {
+  for (i = firstd; i < d.size; i++) {
     // This ll/lr inequality is a cross product that is true if the polygon
-    // was clockwise.
+    // was clockwise. AddInnerPoly() will just negate isLeft.
     d[i].isLeft = ((ll->x - p[lowest].x) * int (lr->y - p[lowest].y) >
       int (ll->y - p[lowest].y) * (lr->x - p[lowest].x)) == (d[i].delta == 1);
   }
 }
 
-void Fill (GdkWindow *w, GdkGC *gc, vector<PolygonEdge> &d)
+void Fill (PolygonEdges &d)
 {
-  vector<PolygonEdge*> heap;
-  heap.resize (d.size () + 1); // leave heap[0] open to make indexing easier
+  PolygonEdge **heap = (PolygonEdge **) malloc ((d.size + 1) * sizeof (*heap));
+  // leave heap[0] open to make indexing easier
   int i, h = 1, j;
-  //set<PolygonEdge *, edgeCmp> active;
-  //typedef set<PolygonEdge *, edgeCmp>::iterator itrType;
   PolygonEdge dummy, left, right;
   
   root.left = NULL;
@@ -306,26 +336,21 @@ void Fill (GdkWindow *w, GdkGC *gc, vector<PolygonEdge> &d)
   left.opp = &dummy;
   left.pt = &left.prev;
   left.isLeft = 1;
-  Add (&left); //active.insert (&left);
+  Add (&left);
   right.prev.x = 30000;
   right.prev.y = 0;
   right.opp = &dummy;
   right.pt = &right.prev;
   right.isLeft = 0;
-/*  rightTop.x = 30000;
-  rightTop.y = 0;
-  right.pt = &rightTop;*/
-  Add (&right); //active.insert (&right);
-  for (i = 0; i < d.size(); i++) {
+  Add (&right);
+/*  for (i = 0; i < d.size(); i++) {
     for (j = 0; j + 1 < d[i].cnt; j++) assert (d[i].pt[j*d[i].delta].y <= d[i].pt[(j+1)*d[i].delta].y);
     if (d[i].continues)                assert (d[i].pt[j*d[i].delta].y <= d[i+1].pt->y);
-  }
-  for (i = 0; i < d.size(); i++) {
+  } // Make sure AddPolygon() and variants are correct */
+  for (i = 0; i < d.size; i++) {
     for (j = h++; j > 1 && heap[j / 2]->pt->y > d[i].pt->y; j /= 2) {
-      //heap[j/2]->heap = &heap[j];
       heap[j] = heap[j/2];
     }
-    //d[i].heap = &heap[j];
     heap[j] = &d[i];
     d[i].opp = NULL;
     if (d[i].continues) ++i; // Don't add the second part to the heap
@@ -333,16 +358,10 @@ void Fill (GdkWindow *w, GdkGC *gc, vector<PolygonEdge> &d)
   for (i = 2; i < h; i++) assert (heap[i]->pt->y >= heap[i/2]->pt->y);
   while (h > 1) {
     PolygonEdge *head = heap[1];
-    printf ("%p %3d\n", head->opp, head->pt->y);
+    //printf ("%p %3d\n", head->opp, head->pt->y);
     if (!head->opp) { // Insert it
       memcpy (&head->prev, head->pt, sizeof (head->prev)); // This is only
       // to make the compare work.
-      /*itrType itr = active.insert (head).first;
-      head->itr = itr;
-      if (head->isLeft) itr++;
-      else itr--;
-      head->opp = itr == active.end () || //itr == active.rend () ||
-        (*itr)->isLeft == head->isLeft ? &dummy : *itr; */
       Add (head);
       head->opp = head->isLeft ? Next (head) : Prev (head);
       if (head->opp == NULL || head->opp->isLeft == head->isLeft) {
@@ -353,7 +372,7 @@ void Fill (GdkWindow *w, GdkGC *gc, vector<PolygonEdge> &d)
     /* Now we render the trapezium between head->opp and head->opp->opp up
        to head->pt->y */
     if (o != &dummy && o->opp != &dummy) {
-      GdkPoint q[4];
+      GdkPoint q[6];
       q[0].y = head->pt->y;
       q[0].x = o->pt->y <= o->prev.y ? o->pt->x
         : o->prev.x + (o->pt->x - o->prev.x) *
@@ -364,13 +383,18 @@ void Fill (GdkWindow *w, GdkGC *gc, vector<PolygonEdge> &d)
             int (q[0].y - o->opp->prev.y) / (o->opp->pt->y - o->opp->prev.y);
       memcpy (&q[2], &o->opp->prev, sizeof (q[2]));
       memcpy (&q[3], &o->prev, sizeof (q[3]));
-      gdk_draw_polygon (w, gc, TRUE, q, 4);
+      memcpy (&q[4], &q[0], sizeof (q[4]));
+      memcpy (&q[5], &q[2], sizeof (q[5]));
+      // Frequently it happens that one of the triangles has 0 area because
+      // two of the points are equal. TODO: Filter them out.
+      glVertexPointer (2, GL_SHORT, 0, q);
+      glDrawArrays (GL_TRIANGLES, 0, 6);
       memcpy (&o->prev, &q[0], sizeof (o->prev));
       memcpy (&o->opp->prev, &q[1], sizeof (o->opp->prev));
     }
     //else if (o != &dummy) memcpy (&o->prev, o->pt, sizeof (o->prev));
     if (o->opp != head) {
-      o->opp->opp = &dummy;
+      o->opp->opp = &dummy; // Complete the 'Add'
       o->opp = head;
     }
 
@@ -381,17 +405,6 @@ void Fill (GdkWindow *w, GdkGC *gc, vector<PolygonEdge> &d)
       head->pt = head[1].pt;
     }
     else { // Remove it
-      #if 0
-      itrType n = head->itr;
-      //#if 0
-      if (head->isLeft) n--;
-      else n++;
-      if (n != active.end() /*&& n != active.rend()*/ && (*n)->opp == &dummy) {
-        n->opp = head->opp;
-        head->opp->opp = n;
-      }
-      active.erase (head->itr);
-      #endif
       head->opp->opp = &dummy;
       PolygonEdge *n = head->isLeft ? Prev (head) : Next (head);
       if (n && n->opp == &dummy) {
@@ -399,122 +412,49 @@ void Fill (GdkWindow *w, GdkGC *gc, vector<PolygonEdge> &d)
         head->opp->opp = n;
       }
       Delete (head);
-      //#endif
-      //assert (itr != active.end());
       head = heap[--h];
     }
     
     for (j = 2; j < h; j *= 2) {
       if (j + 1 < h && heap[j + 1]->pt->y < heap[j]->pt->y) j++;
       if (heap[j]->pt->y >= head->pt->y) break;
-      //heap[j]->heap = &heap[j / 2];
       heap[j / 2] = heap[j];
     }
     heap[j / 2] = head;
     for (i = 2; i < h; i++) assert (heap[i]->pt->y >= heap[i/2]->pt->y);
-    //head->heap = &heap[j / 2];
   } // While going through the edges
+  free (heap);
 }
 
-//int l[2][4] = { 10, 50, 50, 10, 70, 30, 30, 70 };
-
-
-/*struct polyPtr {
-  int *p;
-};
-
-bool operator < (const polyPtr &a, const polyPtr &b)
+extern "C" {
+void
+Java_za_co_rational_OpenGlEsPolygon_OpenGlEsPolygonRenderer_nativeRender( JNIEnv*  env,jobject thiz, jint width, jint height)
 {
-  return a.p[0] < b.p[0];
-}*/
+	glViewport(0,0,width,height);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
 
-GtkWidget *draw;
-GdkColor c;
+	glOrthof(0.0f, width, 0.0f, height, 0.0f, 1.0f);
 
-GdkPoint pt[1000];
-int ptCnt = 0;
+	glMatrixMode(GL_MODELVIEW);						// Really necessary ?
+	glLoadIdentity();							// Really necessary ?
+	glClear(GL_COLOR_BUFFER_BIT);
 
-gint DrawExpose (void)
-{
-  GdkGC *mygc = gdk_gc_new (draw->window);
-  gdk_gc_set_fill (mygc, GDK_SOLID);
-  
-//  seidel *root = NULL;
-//  for (i = 0; i < sizeof (l) / sizeof (l[0]); i++) Add (&root, l[i]);
-/*  int p[] = { 10, 10, 50, 20, 10, 50 };
-  polyPtr ptr[sizeof (p) / sizeof (p[0]) / 2];
-  for (int i = 0; i < sizeof (p) / sizeof (p[0]) / 2; i++) ptr[i].ptr = p + i * 2;
-  sort (ptr, ptr + sizeof (p) / sizeof (p[0]) / 2);
-  set<
-  lower_bound 
-*/
-  
-  c.blue = 0;
-  c.red = 0;
-/*  c.green = 0xffff - c.blue / 2 - c.red / 2;
-  if (c.blue <= 0xF000) c.blue += 0xfff;
-  else {
-    c.blue = 0;
-    c.red = (c.red + (int) 0xfff) % (0xffff + 0xfff);
-  }*/
-  if (ptCnt > 2) {
-    c.green = 0;
-    gdk_colormap_alloc_color (gdk_window_get_colormap (draw->window),
-        &c, FALSE, TRUE);
-    gdk_gc_set_foreground (mygc, &c);
-    gdk_draw_polygon (draw->window, mygc, TRUE, &pt[0], ptCnt);
-    
-    vector<PolygonEdge> d;
-    AddPolygon (d, pt, ptCnt);
-    
-    c.blue = 0xffff;
-    gdk_colormap_alloc_color (gdk_window_get_colormap (draw->window),
-      &c, FALSE, TRUE);
-    gdk_gc_set_foreground (mygc, &c);
-    Fill (draw->window, mygc, d);
+    glEnableClientState(GL_VERTEX_ARRAY);
+	glColor4f (0.0, 0.0, 0.0, 1.0);
 
-    c.green = 0xffff;
-    gdk_colormap_alloc_color (gdk_window_get_colormap (draw->window),
-        &c, FALSE, TRUE);
-    gdk_gc_set_foreground (mygc, &c);
-    gdk_draw_polygon (draw->window, mygc, FALSE, &pt[0], ptCnt);
-  }
+    GdkPoint pt[20];
+    int ptCnt = 0;
+	pt[ptCnt].x = 10;
+	pt[ptCnt++].y = 50;
+	pt[ptCnt].x = 20;
+	pt[ptCnt++].y = 90;
+	pt[ptCnt].x = 50;
+	pt[ptCnt++].y = 50;
+	pt[ptCnt].x = 30;
+	pt[ptCnt++].y = 60;
+	PolygonEdges d = { NULL, 0, 0 };
+	AddPolygon (d, pt, ptCnt);
+	Fill (d);
 }
-
-int Click (GtkWidget * /*widget*/, GdkEventButton *event, void * /*para*/)
-{
-  pt[ptCnt].x = event->x;
-  pt[ptCnt++].y = event->y;
-  gtk_widget_queue_clear (draw); 
-  return FALSE;
-}
-
-int main (int argc, char *argv[])
-{
-/*  pt[ptCnt].x = 10;
-  pt[ptCnt++].y = 50;
-  pt[ptCnt].x = 20;
-  pt[ptCnt++].y = 90;
-  pt[ptCnt].x = 50;
-  pt[ptCnt++].y = 50;
-  pt[ptCnt].x = 30;
-  pt[ptCnt++].y = 60;*/
-
-  gtk_init (&argc, &argv);
-  draw = gtk_drawing_area_new ();
-  gtk_signal_connect (GTK_OBJECT (draw), "expose_event",
-    (GtkSignalFunc) DrawExpose, NULL);
-  gtk_signal_connect (GTK_OBJECT (draw), "button-release-event",
-    (GtkSignalFunc) Click, NULL);
-  gtk_widget_set_events (draw, GDK_EXPOSURE_MASK | GDK_BUTTON_RELEASE_MASK |
-    GDK_BUTTON_PRESS_MASK |  GDK_POINTER_MOTION_MASK);
-  GtkWidget *hbox = gtk_hbox_new (FALSE, 3), *vbox = gtk_vbox_new (FALSE, 0);
-  GtkWidget *window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
-  gtk_signal_connect (GTK_OBJECT (window), "delete_event",
-    GTK_SIGNAL_FUNC (gtk_main_quit), NULL);
-  
-  gtk_container_add (GTK_CONTAINER (window), vbox);
-  gtk_box_pack_start (GTK_BOX (vbox), draw, TRUE, TRUE, 0);
-  gtk_widget_show_all (window);
-  gtk_main ();
 }
