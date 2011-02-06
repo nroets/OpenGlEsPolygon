@@ -381,14 +381,16 @@ void Fill (PolygonEdges &d)
       q[1].x = o->opp->pt->y <= o->opp->prev.y ? o->opp->pt->x
         : o->opp->prev.x + (o->opp->pt->x - o->opp->prev.x) *
             int (q[0].y - o->opp->prev.y) / (o->opp->pt->y - o->opp->prev.y);
-      memcpy (&q[2], &o->opp->prev, sizeof (q[2]));
-      memcpy (&q[3], &o->prev, sizeof (q[3]));
-      memcpy (&q[4], &q[0], sizeof (q[4]));
-      memcpy (&q[5], &q[2], sizeof (q[5]));
-      // Frequently it happens that one of the triangles has 0 area because
-      // two of the points are equal. TODO: Filter them out.
-      glVertexPointer (2, GL_SHORT, 0, q);
-      glDrawArrays (GL_TRIANGLES, 0, 6);
+      if ((o->pt == &o->prev ? o->opp : o)->prev.y < q[0].y) {
+        memcpy (&q[2], &o->opp->prev, sizeof (q[2]));
+        memcpy (&q[3], &o->prev, sizeof (q[3]));
+        memcpy (&q[4], &q[0], sizeof (q[4]));
+        memcpy (&q[5], &q[2], sizeof (q[5]));
+        // Frequently it happens that one of the triangles has 0 area because
+        // two of the points are equal. TODO: Filter them out.
+        glVertexPointer (2, GL_SHORT, 0, q);
+        glDrawArrays (GL_TRIANGLES, 0, 6);
+      }
       memcpy (&o->prev, &q[0], sizeof (o->prev));
       memcpy (&o->opp->prev, &q[1], sizeof (o->opp->prev));
     }
