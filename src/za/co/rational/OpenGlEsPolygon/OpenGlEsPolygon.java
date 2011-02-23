@@ -39,7 +39,7 @@ public class OpenGlEsPolygon extends Activity {
         super.onCreate(savedInstanceState);
         GLSurfaceView mGLView = new OpenGlEsPolygonView(this);
         setContentView(mGLView);
-    } 
+    }  
 
     static  {
         System.loadLibrary("openglespolygon");
